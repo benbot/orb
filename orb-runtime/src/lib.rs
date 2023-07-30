@@ -1,28 +1,49 @@
 use wasmtime::*;
 
-pub fn get_wasm_string() -> wasmtime::Result<String> {
-    let mut store = Store::<()>::default();
+pub struct Runtime {
+    pub engine: Engine,
+    linker: Linker<()>
+}
 
-    let module = Module::from_file(
-        store.engine(),
-        "../target/wasm32-unknown-unknown/debug/wasm_test.wasm",
-    )?;
-    let instance = Instance::new(&mut store, &module, &[])?;
-    let get_func = instance.get_func(&mut store, "tacocat").unwrap();
+impl Runtime {
+    pub fn new() -> Self {
+        let engine = Engine::default();
+        let linker = Linker::new(&engine);
 
-    get_func.call(&mut store, &[900.into()], &mut [])?;
+        Self { engine, linker }
+    }
 
-    let memory = instance.get_memory(&mut store, "memory").unwrap();
+    pub fn get_engine(&self) -> &Engine {
+        &self.engine
+    }
 
-    let mut info_buf = [0u8; 8];
-    memory.read(&mut store, 900, &mut info_buf)?;
-    let addr = i32::from_le_bytes(info_buf[0..4].try_into().unwrap());
-    let len = i32::from_le_bytes(info_buf[4..8].try_into().unwrap());
+    pub fn get_wasm_string(&self, module: &Module) -> wasmtime::Result<String> {
+        let mut store = Store::new(self.get_engine(), ());
 
-    let mut buffer = vec![0u8; len as usize];
-    memory.read(&mut store, addr as usize, &mut buffer)?;
+        let instance = Instance::new(&mut store, &module, &[])?;
+        let get_func = instance.get_func(&mut store, "tacocat").unwrap();
 
-    let message = String::from_utf8(buffer).unwrap();
+        get_func.call(&mut store, &[900.into()], &mut [])?;
 
-    Ok(message)
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+
+        let mut info_buf = [0u8; 8];
+        memory.read(&mut store, 900, &mut info_buf)?;
+        let addr = i32::from_le_bytes(info_buf[0..4].try_into().unwrap());
+        let len = i32::from_le_bytes(info_buf[4..8].try_into().unwrap());
+
+        let mut buffer = vec![0u8; len as usize];
+        memory.read(&mut store, addr as usize, &mut buffer)?;
+
+        let message = String::from_utf8(buffer).unwrap();
+
+        Ok(message)
+    }
+}
+
+pub fn get_module(engine: &Engine, path: &str) -> Module {
+    Module::from_file(
+        engine,
+        path,
+    ).unwrap()
 }
