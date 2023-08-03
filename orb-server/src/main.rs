@@ -1,43 +1,72 @@
-pub mod schema;
-mod sites;
+mod ipfs_rfc_client;
+mod app_subrouter;
+mod config;
 
-use std::collections::HashMap;
+use std::{sync::Arc, collections::HashMap};
+
+use tower::Layer;
 
 use axum::{
-    extract::{Multipart, State},
+    extract::{Multipart, State, Host},
     http::StatusCode,
     response::Html,
     routing::{get, post},
-    Router,
+    Router, body::Body,
 };
 use maud::html;
-use reqwest::multipart::Form;
+use orb_runtime::Runtime;
+use tokio::sync::Mutex;
 
-#[derive(Clone)]
-struct App {
-    runtime: orb_runtime::Runtime,
+pub struct Orb {
+    runtime: Runtime,
+    router: Router
 }
+
+pub type RuntimeDb = Arc<Mutex<HashMap<String, Orb>>>;
 
 #[tokio::main]
 async fn main() {
-    let runtime = orb_runtime::Runtime::new();
+    let runtime_db = Arc::new(Mutex::new(HashMap::new()));
 
-    let app = App { runtime };
+    let sub_router = app_subrouter::SubrouterLayer::new(runtime_db.clone());
 
     let router = Router::new()
         .route("/", get(upload))
         .route("/", post(upload_wasm))
-        .route("/test", get(tess))
-        .with_state(app);
+        .route("/wasm_test", get(wasm_test))
+        .route("/ipfs_test", get(ipfs_test))
+        .route("/host_test", get(host_test))
+        .with_state(runtime_db);
 
+    let app = axum::middleware::from_fn(sub_router).layer(router);
+
+
+    println!("Listening on: 3000");
     axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
-        .serve(router.into_make_service())
+        .serve(app.into_make_service())
         .await
         .unwrap();
 }
 
-async fn tess(State(app): State<App>) -> Html<String> {
-    Html(app.runtime.get_wasm_string("test".to_string()).unwrap())
+async fn host_test(Host(hostname): Host, req: axum::http::Request<Body>) -> Html<String> {
+    Html(hostname)
+}
+
+async fn wasm_test(State(runtime): State<RuntimeDb>) -> Html<String> {
+    Html(
+        (*runtime)
+            .lock()
+            .await
+            .get("test")
+            .unwrap()
+            .runtime
+            .get_wasm_string("test".to_string())
+            .unwrap(),
+    )
+}
+
+async fn ipfs_test() -> Html<String> {
+    Html("test".to_string())
 }
 
 fn html_base() -> maud::Markup {
@@ -57,53 +86,45 @@ async fn upload() -> Html<String> {
     Html((html! {
         (html_base())
         body {
-            div class="container" {
+            main class="container" {
                 h4 { "WASM Test" }
                 form method="post" enctype="multipart/form-data" hx-post="/" hx-target="#result" {
                     input type="text" name="name" placeholder="Name";
-                    input type="file" name="file" multiple="multiple" _="on htmx:xhr:process(loaded, total) set #progress.value = loaded / total";
+                    input type="text" name="endpoint" placeholder="Name";
+                    input type="file" name="file" multiple="multiple" _="on htmx:xhr:process(loaded, total) set #progress.value to loaded / total";
                     progress id="progress" value="0" max="100" {}
                     input type="submit" value="Upload";
                 }
-                button hx-get="/test" hx-target="#result" { "Test me" }
-                p id="result" {}
+                button hx-get="/wasm_test" hx-target="next .result" { "Wasm Test" }
+                span.result _="on htmx:afterSwap wait 2s then transition my opacity to 0% over 1s then set my innerHTML to ''" {}
+                button hx-get="/ipfs_test" hx-target="next .result" { "IPFS Test Save" }
+                span.result _="on htmx:afterSwap wait 2s then transition my opacity to 0% over 1s then set my innerHTML to ''" {}
+                button hx-get="/ipfs_test" hx-target="next .result" { "IPFS Test Load" }
+                span.result _="on htmx:afterSwap wait 2s then transition my opacity to 0% over 1s then set my innerHTML to ''" {}
+
+                article {
+                    h4 { "Rendered From Wasm" }
+                    div id="result" {}
+                }
             }
         }
     }).into_string())
 }
 
-async fn upload_to_ipfs(data: Vec<u8>) -> Result<(), StatusCode> {
-    let client = reqwest::Client::new();
-
-    let res = client
-        .post("http://localhost:5001/api/v0/key/list")
-        // .query(&[("arg", "/namewasm"), ("create", "true")])
-        // .multipart(Form::new().part("file", reqwest::multipart::Part::bytes(data)))
-        .send()
-        .await
-        .unwrap();
-
-    if res.status() != 200 {
-        return Err(res.status());
-    }
-    println!("{:?}", res.text().await.unwrap());
-
-    Ok(())
-}
-
 async fn upload_wasm(
-    State(mut app): State<App>,
+    State(runtime): State<RuntimeDb>,
     mut data: Multipart,
 ) -> Result<Html<String>, StatusCode> {
-
     struct Params {
         name: String,
         file: Vec<u8>,
+        endpoint: String,
     }
 
     let mut params = Params {
         name: String::new(),
         file: Vec::new(),
+        endpoint: String::new(),
     };
 
     while let Some(field) = data.next_field().await.unwrap() {
@@ -111,27 +132,34 @@ async fn upload_wasm(
 
         match name.as_str() {
             "name" => params.name = field.text().await.unwrap(),
+            "endpoint" => params.endpoint = field.text().await.unwrap(),
             "file" => params.file = field.bytes().await.unwrap().to_vec(),
             _ => (),
         }
     }
 
-    if params.file.is_empty() || params.name.is_empty() {
+    if params.file.is_empty() || params.name.is_empty() || params.endpoint.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    app.runtime
+    (*runtime)
+        .lock()
+        .await
+        .get_mut("test")
+        .unwrap()
+        .runtime
         .add_module(&params.name, &params.file)
         .unwrap();
 
-    let resp = upload_to_ipfs(params.file.to_vec()).await;
+    let result = ipfs_rfc_client::save_wasm(&params.name, &params.endpoint, params.file).await;
 
-    if resp.is_err() {
-        return Err(resp.unwrap_err());
-    }
+    match result {
+        Ok(_) => (),
+        Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+    };
 
     let markup = html! {
-        ins { "test" }
+        ins { (params.name) " for " (params.endpoint) " uploaded successfully!" }
     };
 
     Ok(Html(markup.into_string()))

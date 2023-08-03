@@ -1,6 +1,5 @@
-use std::{collections::HashMap, ptr::null};
+use std::collections::HashMap;
 
-use uuid::uuid;
 use wasmtime::*;
 
 #[derive(Clone, Copy, Debug)]
@@ -99,7 +98,7 @@ impl Runtime {
 
     pub fn add_module(&mut self, name: &str, bytes: &[u8]) -> wasmtime::Result<()> {
         let module = Module::from_binary(self.get_engine(), bytes).unwrap();
-        let result = self.modules.insert(name.to_string(), module.clone());
+        self.modules.insert(name.to_string(), module.clone());
 
         let nuuid = uuid::Uuid::new_v4().to_string();
         println!("nuuid: {}", nuuid);
@@ -110,7 +109,6 @@ impl Runtime {
         match result {
             Some(_) => Err(wasmtime::Error::msg("asdf")),
             None => Ok(()),
-            _ => unreachable!(),
         }
     }
 

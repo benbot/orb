@@ -11,5 +11,5 @@ maud = "0.25.0"
 reqwest = { version = "0.11.18", features = ["multipart"] }
 tokio = { version = "1.29.1", features = ["macros", "rt-multi-thread", "net", "sync"] }
 orb-runtime = { path = "../orb-runtime" }
-diesel = { version = "2.1.0", features = [ "sqlite" ] }
 uuid = { version = "1.4.1", features = ["fast-rng", "v4"] }
+tower = "0.4.13"
